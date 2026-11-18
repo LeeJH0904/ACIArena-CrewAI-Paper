@@ -165,6 +165,9 @@ def build_mas(args, llm_config, logger):
     if len(args.malicious_agents) > 0:
         kwargs["malicious_agents"] = args.malicious_agents
 
+    if mas_name == 'crewai_seq_nodeleg':
+        kwargs['context_mode'] = getattr(args, 'crewai_context_mode', 'all_previous')
+
     return mas_class(**kwargs)
 
 def build_suite(args):

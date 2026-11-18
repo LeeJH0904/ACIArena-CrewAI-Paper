@@ -1,6 +1,7 @@
 from aciarena.utils import build_suite
 from aciarena.evaluation.g7_suite import G7LegacyEvaluationSuite
 from aciarena.evaluation.g7_manifest import G7Manifest, G7ManifestError
+from aciarena.mas.crewai.sequential_mas import CONTEXT_MODES
 from dotenv import load_dotenv
 import argparse
 import copy
@@ -105,7 +106,18 @@ def _crewai_g7_dry_run(args, manifest):
             (Path(args.output_dir) / args.experiment_id).resolve()),
     }
 
+def _validate_crewai_context_mode(args):
+    mode = getattr(args, 'crewai_context_mode', 'all_previous')
+    if mode not in CONTEXT_MODES:
+        raise ValueError(
+            f'--crewai_context_mode must be one of {list(CONTEXT_MODES)}, got {mode!r}')
+    if args.mas.lower() != 'crewai_seq_nodeleg' and mode != 'all_previous':
+        raise ValueError(
+            '--crewai_context_mode applies only to --mas crewai_seq_nodeleg')
+
+
 def main(args):
+    _validate_crewai_context_mode(args)
     if args.mas.lower() == 'crewai_seq_nodeleg' or args.mas.lower() in G7_LEGACY_SYSTEMS:
         _validate_g7_destination(args)
     if args.mas.lower() == 'crewai_seq_nodeleg':
@@ -191,6 +203,9 @@ if __name__ == "__main__":
     parser.add_argument('--execute', action='store_true', help='Permit model calls; omitted means a zero-call dry-run')
     parser.add_argument('--model_config', default=None, help='Legacy non-CrewAI model configuration override')
     parser.add_argument('--judge_config', default=None, help='Legacy non-CrewAI Judge configuration override')
+    parser.add_argument('--crewai_context_mode', choices=list(CONTEXT_MODES), default='all_previous',
+                        help='E1: finalizer context for crewai_seq_nodeleg (all_previous = crewai default, '
+                             'previous_only = context=[review_task]); other MAS accept only the default')
     parser.add_argument(
         "--mas",
         type=str,

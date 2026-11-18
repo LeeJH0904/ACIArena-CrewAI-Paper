@@ -16,7 +16,7 @@ https://github.com/Greysahy/aciarena.git
 
 ```bash
 git clone https://github.com/LeeJH0904/ACIArena-CrewAI-Paper.git
-cd CrewACI
+cd ACIArena-CrewAI-Paper
 
 sudo apt update
 sudo apt install -y python3 python3-pip python3-venv
