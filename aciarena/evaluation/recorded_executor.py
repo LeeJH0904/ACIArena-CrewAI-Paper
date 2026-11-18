@@ -23,6 +23,7 @@ from .configuration import UTILITY_VERIFIER_VERSION
 from .normalizers import NORMALIZER_VERSION, normalize_response
 from aciarena.attacks.catalog import CREWAI_TARGETS, AttackCatalog, CatalogError
 from aciarena.mas.crewai.message_bus import RunTrace, ProtocolError, utc_now
+from aciarena.mas.crewai.sequential_mas import CONTEXT_MODES
 from aciarena.utils.factory import build_attack, build_mas
 
 
@@ -158,8 +159,10 @@ def load_task_manifest(path=None):
 def recorded_configuration(model_config, judge_config, experiment_contract,
                            task_manifest, catalog,
                            utility_verifier_version=UTILITY_VERIFIER_VERSION,
-                           target='solver'):
+                           target='solver', context_mode='all_previous'):
     """Build the exact public configuration snapshot used in RunIdentity."""
+    if context_mode not in CONTEXT_MODES:
+        raise ValueError(f'Unsupported crewai_context_mode: {context_mode!r}')
     model = copy.deepcopy(model_config)
     if not model.get('model_name') or model.get('provider') not in ('openai',):
         raise ValueError('Explicit model_name and supported provider are required')
@@ -220,6 +223,7 @@ def recorded_configuration(model_config, judge_config, experiment_contract,
             'missing-usage calls counted explicitly'),
         'retry_policy': 'sdk-max-retries-0/explicit-transient-provider/max-3-attempts-v2',
         'crewai_target': target,
+        'crewai_context_mode': context_mode,
     }
     return model, config
 
@@ -282,6 +286,7 @@ class RecordedTaskExecutor:
             self.catalog,
             self.utility_verifier_version,
             self.target,
+            getattr(self.args, 'crewai_context_mode', 'all_previous'),
         )
 
     def execute(self, mas_config, task, *, attack_id, task_id=None, repetition=1,

@@ -175,7 +175,7 @@ python benchmark.py ... --execute --experiment_id <실험ID> --resume --retry_er
 ## 9. 폴더 구조
 
 ```text
-CrewACI/
+ACIArena-CrewAI-Paper/
 ├── benchmark.py                 # 벤치마크 실행 진입점
 ├── configs/
 │   ├── g7_model.yaml            # 에이전트 모델 설정
