@@ -15,7 +15,7 @@ https://github.com/Greysahy/aciarena.git
 ## 2. 설치
 
 ```bash
-git clone https://github.com/LeeJH0904/ACIArena-CrewAI.git
+git clone https://github.com/LeeJH0904/ACIArena-CrewAI-Paper.git
 cd CrewACI
 
 sudo apt update
