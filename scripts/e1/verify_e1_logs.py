@@ -38,10 +38,13 @@ Checks (FAIL -> exit code 1)
                 mismatches are reported, not failed
   [complete]    per (condition, rep, domain, goal, target): one final record per
                 planned (task, attack); attack runs carry target_invoked and
-                payload_injected; error/retry states summarised
+                payload_injected; every final status is success (FAIL otherwise;
+                --allow-nonsuccess reports instead). Runs that succeeded after a
+                retry (attempt_no > 1) pass and are counted
   [audit]       each folder passes the repository audit run by its own code:
                 previous_only with the E1 code root, all_previous with the
-                baseline (22dd78f) code root, in a separate interpreter
+                baseline (22dd78f) code root, in one separate interpreter per code
+                root that audits that root's folders in turn
 Outputs a human summary on stdout and a JSON report (--out).
 """
 
@@ -80,11 +83,14 @@ def previous_only_prompt(query, review):
 # Audit helper: executed by the interpreter of the code root that produced
 # the folder, so every source/config hash is checked against that code.
 # Read-only: parses the JSONL files itself instead of opening a RunWriter.
+# One interpreter per code root; it audits that root's folders in turn
+# (folder list on stdin, one JSON result per folder on stdout).
 # --------------------------------------------------------------------------
 AUDIT_HELPER = r'''
 import inspect, json, os, sys
 from pathlib import Path
-root, folder, spec = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve(), json.loads(sys.argv[3])
+root = Path(sys.argv[1]).resolve()
+jobs = json.loads(sys.stdin.read())          # [{"folder": ..., "spec": {...}}, ...]
 os.chdir(root); sys.path.insert(0, str(root))
 import yaml
 from aciarena.attacks.catalog import AttackCatalog
@@ -96,42 +102,55 @@ task_manifest, tasks = load_task_manifest(manifest_dir / 'tasks.json')
 catalog = AttackCatalog(manifest_dir / 'attacks.json')
 model = yaml.safe_load(open(root / 'configs/g7_model.yaml'))
 judge = yaml.safe_load(open(root / 'configs/g7_judge.yaml'))
-kwargs = {'target': spec['target'] or 'solver'}
 supports_mode = 'context_mode' in inspect.signature(recorded_configuration).parameters
-if supports_mode:
-    kwargs['context_mode'] = spec['context_mode']
-elif spec['context_mode'] != 'all_previous':
-    print(json.dumps({'ok': False, 'errors': ['code_root_has_no_context_mode_support']})); sys.exit(0)
-_, config = recorded_configuration(model, judge, {'contract_id': 'g7-direct-api'},
-                                   task_manifest, catalog, **kwargs)
-config_hash = canonical_hash(config)
-read = lambda name: [json.loads(l) for l in (folder / name).read_text().splitlines() if l.strip()]
-errors = []
-try:
-    records = [RunRecord.model_validate(r) for r in read('runs.jsonl')]
-    messages = [MessageRecord.model_validate(m) for m in read('messages.jsonl')]
-except Exception as exc:
-    print(json.dumps({'ok': False, 'errors': [f'schema:{type(exc).__name__}:{str(exc)[:300]}']})); sys.exit(0)
-if (folder / '.write_pending.json').exists():
-    errors.append('storage:pending_write')
-attempts = {(r.run_id, r.attempt_no) for r in records}
-orphans = {(m.run_id, m.attempt_no) for m in messages} - attempts
-if orphans:
-    errors.append(f'storage:unfinalized_attempts:{len(orphans)}')
-scopes = {(r.experiment_id, r.repetition, r.phase) for r in records}
-if len(scopes) != 1:
-    errors.append(f'scope_not_unique:{sorted(scopes)}')
-experiment_id, repetition, phase = sorted(scopes)[0]
-plan = build_matrix_plan(experiment_id=experiment_id,
-                         selections=[(t, a) for t in spec['task_ids'] for a in spec['attack_ids']],
-                         tasks=tasks, catalog=catalog, repetition=repetition, phase=phase,
-                         config_hash=config_hash)
-report = audit_matrix_records(plan, records, messages, tasks, catalog,
-                              config_directory=folder / 'configs', allow_additional=True,
-                              require_injection=spec['goal'] != 'benign')
-errors += report['errors']
-print(json.dumps({'ok': not errors, 'errors': errors[:40], 'n_errors': len(errors),
-                  'config_hash': config_hash, 'experiment_id': experiment_id}))
+
+
+def audit_one(folder, spec):
+    folder = Path(folder).resolve()
+    kwargs = {'target': spec['target'] or 'solver'}
+    if supports_mode:
+        kwargs['context_mode'] = spec['context_mode']
+    elif spec['context_mode'] != 'all_previous':
+        return {'ok': False, 'errors': ['code_root_has_no_context_mode_support']}
+    _, config = recorded_configuration(model, judge, {'contract_id': 'g7-direct-api'},
+                                       task_manifest, catalog, **kwargs)
+    config_hash = canonical_hash(config)
+    read = lambda name: [json.loads(l) for l in (folder / name).read_text().splitlines() if l.strip()]
+    errors = []
+    try:
+        records = [RunRecord.model_validate(r) for r in read('runs.jsonl')]
+        messages = [MessageRecord.model_validate(m) for m in read('messages.jsonl')]
+    except Exception as exc:
+        return {'ok': False, 'errors': [f'schema:{type(exc).__name__}:{str(exc)[:300]}']}
+    if (folder / '.write_pending.json').exists():
+        errors.append('storage:pending_write')
+    attempts = {(r.run_id, r.attempt_no) for r in records}
+    orphans = {(m.run_id, m.attempt_no) for m in messages} - attempts
+    if orphans:
+        errors.append(f'storage:unfinalized_attempts:{len(orphans)}')
+    scopes = {(r.experiment_id, r.repetition, r.phase) for r in records}
+    if len(scopes) != 1:
+        errors.append(f'scope_not_unique:{sorted(scopes)}')
+    experiment_id, repetition, phase = sorted(scopes)[0]
+    plan = build_matrix_plan(experiment_id=experiment_id,
+                             selections=[(t, a) for t in spec['task_ids'] for a in spec['attack_ids']],
+                             tasks=tasks, catalog=catalog, repetition=repetition, phase=phase,
+                             config_hash=config_hash)
+    report = audit_matrix_records(plan, records, messages, tasks, catalog,
+                                  config_directory=folder / 'configs', allow_additional=True,
+                                  require_injection=spec['goal'] != 'benign')
+    errors += report['errors']
+    return {'ok': not errors, 'errors': errors[:40], 'n_errors': len(errors),
+            'config_hash': config_hash, 'experiment_id': experiment_id}
+
+
+results = []
+for job in jobs:
+    try:
+        results.append(audit_one(job['folder'], job['spec']))
+    except Exception as exc:                   # isolate one folder's failure from the rest
+        results.append({'ok': False, 'errors': [f'helper_failed:{type(exc).__name__}:{str(exc)[:300]}']})
+print(json.dumps(results))
 '''
 
 
@@ -375,7 +394,19 @@ def section_identity(report, data):
     return result
 
 
+_PLANNED = {}
+
+
 def planned(domain, task_override):
+    """Planned task ids and attack ids per goal (manifest load cached per run)."""
+    key = (domain, tuple(task_override.get(domain) or ()))
+    if key not in _PLANNED:
+        _PLANNED[key] = _planned(domain, task_override)
+    task_ids, attacks = _PLANNED[key]
+    return list(task_ids), {goal: list(ids) for goal, ids in attacks.items()}
+
+
+def _planned(domain, task_override):
     sys.argv = [sys.argv[0]]
     sys.path.insert(0, str(ROOT))
     from aciarena.evaluation.g7_manifest import G7Manifest
@@ -387,8 +418,8 @@ def planned(domain, task_override):
     return task_ids, attacks
 
 
-def section_complete(report, data, task_override):
-    print('\n== [complete] counts, duplicates, activation fields, error/retry summary')
+def section_complete(report, data, task_override, allow_nonsuccess=False):
+    print('\n== [complete] counts, duplicates, activation fields, final status, retries')
     summary = {}
     for (condition, rep, domain), runs in sorted(data.items()):
         task_ids, attacks = planned(domain, task_override)
@@ -413,8 +444,16 @@ def section_complete(report, data, task_override):
                              not no_fields, f'{len(no_fields)} runs without the fields')
             statuses = Counter(r['status'] for r in rows)
             retried = sum(r['_attempts'] > 1 for r in rows)
+            nonsuccess = [(r['task_id'], r['attack_id'], r['status']) for r in rows if r['status'] != 'success']
+            status_detail = (f'{len(nonsuccess)} non-success, e.g. {nonsuccess[:3]}; '
+                             f'retried then success={sum(r["_attempts"] > 1 and r["status"] == "success" for r in rows)}')
+            if allow_nonsuccess:
+                if nonsuccess:
+                    report.info(f'{label}: final status not success (allowed by --allow-nonsuccess): {status_detail}')
+            else:
+                report.check('complete', f'{label}: every final status is success', not nonsuccess, status_detail)
             summary[label] = {'runs': len(rows), 'planned': len(expected), 'status': dict(statuses),
-                              'retried_runs': retried,
+                              'retried_runs': retried, 'nonsuccess_runs': len(nonsuccess),
                               'utility_status': dict(Counter(r['utility_status'] for r in rows)),
                               'attack_status': dict(Counter(r['attack_status'] for r in rows)),
                               'target_invoked_false': sum(r['target_invoked'] is False for r in rows),
@@ -448,7 +487,8 @@ def section_audit(report, folders, task_override, args):
         if base_head is not None:
             report.check('audit', f'baseline code root is at {BASELINE_COMMIT}',
                          base_head.startswith(BASELINE_COMMIT), base_head)
-    results = []
+    jobs = defaultdict(list)                          # (root, python) -> [(index, meta, spec)]
+    jobs_order = []                                   # outcomes, kept in folder order
     for meta in folders:
         condition = meta['condition']
         root, python = roots[condition]
@@ -468,20 +508,30 @@ def section_audit(report, folders, task_override, args):
         task_ids, attacks = planned(meta['domain'], task_override)
         spec = {'context_mode': condition, 'target': target, 'goal': goal,
                 'task_ids': task_ids, 'attack_ids': attacks[goal]}
-        python = python or str(root / '.venv/bin/python')
-        proc = subprocess.run([python, '-c', AUDIT_HELPER, str(root), meta['folder'], json.dumps(spec)],
-                              capture_output=True, text=True, cwd=root)
+        jobs[root, python or str(root / '.venv/bin/python')].append((len(jobs_order), meta, spec))
+        jobs_order.append(None)
+    results = []
+    for (root, python), batch in jobs.items():
+        proc = subprocess.run([python, '-c', AUDIT_HELPER, str(root)], capture_output=True, text=True, cwd=root,
+                              input=json.dumps([{'folder': meta['folder'], 'spec': spec} for _, meta, spec in batch]))
         try:
-            outcome = json.loads(proc.stdout.strip().splitlines()[-1])
+            outcomes = json.loads(proc.stdout.strip().splitlines()[-1])
+            if len(outcomes) != len(batch):
+                raise ValueError('result count mismatch')
         except (ValueError, IndexError):
-            outcome = {'ok': False, 'errors': [f'helper_failed:{proc.stderr[-400:]}']}
-        outcome['folder'] = meta['folder']
-        outcome['code_root'] = str(root)
+            outcomes = [{'ok': False, 'errors': [f'helper_failed:{proc.stderr[-400:]}']} for _ in batch]
+        for (index, meta, _), outcome in zip(batch, outcomes):
+            outcome['folder'] = meta['folder']
+            outcome['code_root'] = str(root)
+            jobs_order[index] = (meta, outcome)
+    for meta, outcome in jobs_order:
+        condition = meta['condition']
         results.append(outcome)
         rel = Path(meta['folder']).name
         report.check('audit', f'{condition} v{meta["repetition"]} {meta["domain"]} {rel}: audit by '
                      f'{"E1" if condition == "previous_only" else "baseline"} code',
-                     outcome['ok'], f'{outcome.get("n_errors", len(outcome["errors"]))} errors, e.g. {outcome["errors"][:3]}')
+                     outcome['ok'],
+                     f'{outcome.get("n_errors", len(outcome["errors"]))} errors, e.g. {outcome["errors"][:3]}')
     return results
 
 
@@ -495,6 +545,8 @@ def main(argv=None):
     parser.add_argument('--baseline-python', default=None)
     parser.add_argument('--skip-baseline-audit', action='store_true')
     parser.add_argument('--skip-audit', action='store_true')
+    parser.add_argument('--allow-nonsuccess', action='store_true',
+                        help='report final non-success runs instead of failing [complete]')
     parser.add_argument('--out', default='e1_log_verification.json')
     args = parser.parse_args(argv)
     entries, task_override = parse_entries(args)
@@ -508,7 +560,7 @@ def main(argv=None):
     section_config(report, data)
     output['treatment'] = section_treatment(report, data)
     output['identity'] = section_identity(report, data)
-    output['completeness'] = section_complete(report, data, task_override)
+    output['completeness'] = section_complete(report, data, task_override, args.allow_nonsuccess)
     output['audit'] = [] if args.skip_audit else section_audit(report, folders, task_override, args)
     passed = sum(c['ok'] for c in report.checks)
     failed = len(report.checks) - passed
