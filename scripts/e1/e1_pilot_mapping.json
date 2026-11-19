@@ -1,0 +1,9 @@
+{
+ "entries": [
+  {"condition": "previous_only", "repetition": 1, "domain": "code", "paths": ["outputs/paper/e1_pilot"]},
+  {"condition": "previous_only", "repetition": 1, "domain": "math", "paths": ["outputs/paper/e1_pilot"]},
+  {"condition": "all_previous", "repetition": 1, "domain": "code", "paths": ["outputs/v1_outputs/crewai_code_v1"]},
+  {"condition": "all_previous", "repetition": 1, "domain": "math", "paths": ["outputs/v1_outputs/crewai_math_v1"]}
+ ],
+ "task_ids": {"code": ["code_0000"], "math": ["math_0000"]}
+}

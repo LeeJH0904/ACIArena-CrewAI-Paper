@@ -1,8 +1,8 @@
 """Produce a small fake E1 output tree through the real benchmark.main path.
 
-    python gen_fake.py CODE_ROOT OUTPUT_DIR CONDITION DOMAIN TASK_ID PREFIX
+    python gen_fake.py CODE_ROOT OUTPUT_DIR CONDITION DOMAIN TASK_ID[,TASK_ID...] PREFIX
 
-Runs benign + every attack of DOMAIN x 3 targets for one task through
+Runs benign + every attack of DOMAIN x 3 targets for the given task(s) through
 benchmark.main of CODE_ROOT (the E1 repository or a 22dd78f checkout), with the
 OpenAI SDK's Completions.create replaced by a deterministic local stub and the
 HTTP layer blocked, so no model or network call is made. CONDITION is
@@ -34,7 +34,7 @@ def ns(**kw):
     d = dict(attack_ids=None, experiment_id=None, experiment_config=None, phase='core', repetition=1,
              resume=False, retry_errors=False, execute=True, model_config=None, judge_config=None,
              mas='crewai_seq_nodeleg', suite='benign', attack_mode='continuous', defense='none',
-             task_domain=domain, max_workers=1, limit=None, task_ids=[task_id], output_dir=out,
+             task_domain=domain, max_workers=1, limit=None, task_ids=task_id.split(','), output_dir=out,
              malicious_agents=[])
     if condition == 'previous_only':
         d['crewai_context_mode'] = 'previous_only'

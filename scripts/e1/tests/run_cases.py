@@ -26,6 +26,10 @@ Cases
   D8     one run's final status is model_error                        -> [complete]
   D8a    D8 data with --allow-nonsuccess                  -> PASS (reported)
   D9     one run failed once and succeeded on attempt 2   -> PASS (counted)
+  P1     pilot layout (code + math experiments in one folder, one task)
+         vs baseline logs holding an extra task, task_ids mapped -> PASS
+  P2     P1 + one finalizer x message raw_response changed       -> [identity]
+  P3     P1 without task_ids (extra task is unplanned/unpaired)  -> [complete], [identity]
 Exit code 0 when every case meets its expectation.
 """
 import argparse
@@ -78,7 +82,11 @@ def generate(work, baseline, regenerate):
     return data
 
 
-def mapping(data_dir):
+def mapping(data_dir, document=None):
+    if document is not None:
+        path = data_dir.parent / f'{data_dir.name}_mapping.json'
+        path.write_text(json.dumps(document, indent=1))
+        return path
     entries = [{'condition': cond, 'repetition': rep, 'domain': domain,
                 'paths': [str(data_dir / tree_name(cond, domain, rep))]} for cond, domain, rep in TREES]
     path = data_dir.parent / f'{data_dir.name}_mapping.json'
@@ -86,11 +94,11 @@ def mapping(data_dir):
     return path
 
 
-def run(verifier, data_dir, label, reports, baseline, extra=()):
+def run(verifier, data_dir, label, reports, baseline, extra=(), document=None):
     out = reports / f'report_{label}.json'
     out.unlink(missing_ok=True)
     start = time.monotonic()
-    proc = subprocess.run([PY, str(verifier), '--mapping', str(mapping(data_dir)), '--baseline-code-root',
+    proc = subprocess.run([PY, str(verifier), '--mapping', str(mapping(data_dir, document)), '--baseline-code-root',
                            str(baseline), '--baseline-python', PY, '--out', str(out), *extra],
                           capture_output=True, text=True, cwd=E1)
     elapsed = time.monotonic() - start
@@ -101,6 +109,44 @@ def run(verifier, data_dir, label, reports, baseline, extra=()):
     total = re.search(r'TOTAL: (\d+) PASS, (\d+) FAIL', proc.stdout)
     return {'exit': proc.returncode, 'fails': fails, 'elapsed': elapsed,
             'total': f'{total.group(1)} PASS / {total.group(2)} FAIL' if total else proc.stderr[-300:]}
+
+
+# ----------------------------------------------------- pilot-layout cases
+WIDE_TASKS = {'code': 'code_0000,code_0001', 'math': 'math_0000,math_0001'}
+
+
+def pilot_layout(work, clean, baseline, name, with_task_ids=True):
+    """Pilot output (code + math experiments in one folder, one task each) vs
+    baseline logs that also hold another task (full-matrix layout)."""
+    wide = work / 'data_wide'
+    for domain in ('code', 'math'):
+        out = wide / f'base_{domain}_v1'
+        if not out.exists():
+            subprocess.run([PY, GEN, str(baseline), str(out), 'all_previous', domain, WIDE_TASKS[domain],
+                            prefix('all_previous', domain)], check=True, cwd=baseline,
+                           capture_output=True, text=True)
+    data = work / f'defect_{name}'
+    shutil.rmtree(data, ignore_errors=True)
+    pilot = data / 'e1_pilot'
+    for domain in ('code', 'math'):
+        for exp in (clean / f'prevonly_{domain}_v1').iterdir():
+            shutil.copytree(exp, pilot / exp.name)
+        shutil.copytree(wide / f'base_{domain}_v1', data / f'v1_{domain}')
+    document = {'entries': [
+        {'condition': 'previous_only', 'repetition': 1, 'domain': d, 'paths': [str(pilot)]} for d in ('code', 'math')
+    ] + [
+        {'condition': 'all_previous', 'repetition': 1, 'domain': d, 'paths': [str(data / f'v1_{d}')]}
+        for d in ('code', 'math')]}
+    if with_task_ids:
+        document['task_ids'] = {d: [t] for d, t in TASKS.items()}
+    return data, document
+
+
+def p2_identity(data):
+    f = next(p for p in (data / 'e1_pilot').iterdir() if p.name.endswith('code_finalizer_disc'))
+    rows = jsonl(f / 'runs.jsonl')
+    next(r for r in rows if r['attack_surface'] == 'message')['raw_response'] += ' '
+    write_jsonl(f / 'runs.jsonl', rows)
 
 
 # ---------------------------------------------------------------- mutations
@@ -201,6 +247,10 @@ CASES = {   # name: (label, mutation, extra verifier args, expected exit, sectio
     'D8': ('final status model_error on one run', d8_nonsuccess, (), 1, {'complete'}),
     'D8a': ('D8 data with --allow-nonsuccess', d8_nonsuccess, ('--allow-nonsuccess',), 0, set()),
     'D9': ('failed attempt 1, success on attempt 2', d9_retried_success, (), 0, set()),
+    # pilot layout: one shared pilot folder vs baseline logs with an extra task
+    'P1': ('pilot layout vs wider baseline, task_ids mapped', 'P1', (), 0, set()),
+    'P2': ('P1 + finalizer x message raw_response +1 char', 'P2', (), 1, {'identity'}),
+    'P3': ('P1 without task_ids (extra baseline task counted)', 'P3', (), 1, {'complete', 'identity'}),
 }
 
 
@@ -222,15 +272,19 @@ def main():
     ok_all = True
     for name in args.cases.split(','):
         label, mutate, extra, want_exit, want_fail = CASES[name]
-        data, base_root = clean, baseline
-        if mutate == 'D6':
+        data, base_root, document = clean, baseline, None
+        if mutate in ('P1', 'P2', 'P3'):
+            data, document = pilot_layout(work, clean, baseline, name, with_task_ids=mutate != 'P3')
+            if mutate == 'P2':
+                p2_identity(data)
+        elif mutate == 'D6':
             base_root = E1
         elif mutate is not None:
             data = work / f'defect_{name}'
             shutil.rmtree(data, ignore_errors=True)
             shutil.copytree(clean, data)
             mutate(data)
-        result = run(args.verifier, data, name, reports, base_root, extra)
+        result = run(args.verifier, data, name, reports, base_root, extra, document)
         ok = result['exit'] == want_exit and want_fail <= set(result['fails']) and (bool(want_fail) or not result['fails'])
         ok_all &= ok
         expected = f'exit {want_exit}' + (f' incl. {sorted(want_fail)}' if want_fail else ' no FAIL')

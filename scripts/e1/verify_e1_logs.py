@@ -17,7 +17,9 @@ names, e.g. crewai_exp2_*, do not matter):
        {"condition": "all_previous",  "repetition": 1, "domain": "code",
         "paths": ["/data/v1/crewai_code"]}
      ],
-     "task_ids": {"code": ["code_0000"]}}      # optional: restrict the plan (pilot)
+     "task_ids": {"code": ["code_0000"]}}      # optional (pilot): restrict the plan and
+                                               # keep only these tasks' runs, so a pilot can
+                                               # be compared with full-matrix logs
 
 Entries can also be given as --entry CONDITION:REPETITION:DOMAIN:PATH[,PATH...].
 
@@ -211,9 +213,15 @@ def load_folder(folder):
     return finals
 
 
-def discover(entries):
-    """Return {(condition, rep, domain): [final run dicts]} and folder metadata."""
-    data, folders = defaultdict(list), []
+def discover(entries, task_override=None):
+    """Return {(condition, rep, domain): [final run dicts]} and folder metadata.
+
+    With task_ids in the mapping (pilot), only runs of those tasks are kept, so
+    full-matrix baseline logs can be compared against a pilot; folders left
+    with no run of the entry's domain/tasks are skipped (and listed).
+    """
+    task_override = task_override or {}
+    data, folders, skipped = defaultdict(list), [], []
     for entry in entries:
         found = []
         for raw in entry['paths']:
@@ -225,6 +233,15 @@ def discover(entries):
             raise SystemExit(f'No runs.jsonl under {entry["paths"]}')
         for folder in found:
             runs = [r for r in load_folder(folder) if r['task_domain'] == entry['domain']]
+            keep = task_override.get(entry['domain'])
+            filtered_out = 0
+            if keep:
+                kept = [r for r in runs if r['task_id'] in set(keep)]
+                filtered_out, runs = len(runs) - len(kept), kept
+            if not runs:
+                skipped.append({'folder': str(folder), 'condition': entry['condition'],
+                                'domain': entry['domain'], 'filtered_out': filtered_out})
+                continue
             key = (entry['condition'], int(entry['repetition']), entry['domain'])
             for run in runs:
                 run['_condition'], run['_rep'] = key[0], key[1]
@@ -233,8 +250,8 @@ def discover(entries):
             targets = {r['malicious_agent'] for r in runs}
             folders.append({'folder': str(folder), 'condition': key[0], 'repetition': key[1],
                             'domain': key[2], 'goals': sorted(goals), 'targets': sorted(map(str, targets)),
-                            'runs': len(runs)})
-    return data, folders
+                            'runs': len(runs), 'filtered_out': filtered_out})
+    return data, folders, skipped
 
 
 def pair_key(run):
@@ -508,6 +525,8 @@ def section_audit(report, folders, task_override, args):
         task_ids, attacks = planned(meta['domain'], task_override)
         spec = {'context_mode': condition, 'target': target, 'goal': goal,
                 'task_ids': task_ids, 'attack_ids': attacks[goal]}
+        if python and ('/' in python) and not Path(python).is_absolute():
+            python = str(Path(python).absolute())       # the helper runs with cwd=root
         jobs[root, python or str(root / '.venv/bin/python')].append((len(jobs_order), meta, spec))
         jobs_order.append(None)
     results = []
@@ -550,13 +569,19 @@ def main(argv=None):
     parser.add_argument('--out', default='e1_log_verification.json')
     args = parser.parse_args(argv)
     entries, task_override = parse_entries(args)
-    data, folders = discover(entries)
+    data, folders, skipped = discover(entries, task_override)
     report = Report()
     print('E1 log verification')
     for meta in folders:
         print(f"  folder {meta['condition']} v{meta['repetition']} {meta['domain']} "
-              f"{meta['goals']}/{meta['targets']} runs={meta['runs']}  {meta['folder']}")
-    output = {'entries': entries, 'folders': folders}
+              f"{meta['goals']}/{meta['targets']} runs={meta['runs']}"
+              f"{' (other tasks filtered out: %d)' % meta['filtered_out'] if meta['filtered_out'] else ''}"
+              f"  {meta['folder']}")
+    for meta in skipped:
+        print(f"  skipped (no {meta['domain']} run of the mapped tasks): {meta['folder']}")
+    if task_override:
+        print(f'  task_ids restriction: {task_override}')
+    output = {'entries': entries, 'folders': folders, 'skipped_folders': skipped, 'task_ids': task_override}
     section_config(report, data)
     output['treatment'] = section_treatment(report, data)
     output['identity'] = section_identity(report, data)
